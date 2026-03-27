@@ -1,3 +1,3 @@
 {
-  "buildCommand": "mkdir -p dist && vite build --configLoader native"
+  "buildCommand": "vite build --configLoader native"
 }
