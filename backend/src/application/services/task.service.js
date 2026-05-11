@@ -11,6 +11,7 @@ const BoardService = require("./board.service");
 const { serializeTask } = require("../serializers/task.serializer");
 const domainEvents = require("../../infrastructure/events/domain-events");
 const UndoService = require("./undo.service");
+const columnSemanticFlyweightFactory = require("../reporting/flyweights/ColumnSemanticFlyweightFactory");
 
 function ensureValidObjectId(id, label) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -31,7 +32,8 @@ async function getTaskOrThrow(taskId, { populate = false } = {}) {
       .populate("attachments.uploadedBy", "username email role")
       .populate("timeLogs.user", "username email role")
       .populate("history.user", "username email role")
-      .populate("subtasks.completedBy", "username email role");
+      .populate("subtasks.completedBy", "username email role")
+      .populate("subtasks.assignedTo", "username email role");
   }
 
   const task = await query;
@@ -87,6 +89,30 @@ async function ensureTaskAssignmentPermission(project, user) {
   throw new Error("No permission to assign this task");
 }
 
+async function ensureSubtaskAssignmentPermission(task, project, user) {
+  if (project.createdBy?.toString?.() === user.id || user.role === "ADMIN") {
+    return true;
+  }
+
+  const isTaskAssignee = (task.assignees || []).some((assignee) => toObjectIdString(assignee) === user.id);
+
+  if (isTaskAssignee) {
+    return true;
+  }
+
+  const membership = await ProjectMember.findOne({
+    projectId: project._id,
+    userId: user.id,
+    status: "ACTIVE"
+  }).select("role");
+
+  if (membership?.role === "OWNER") {
+    return true;
+  }
+
+  throw new Error("No permission to assign subtasks");
+}
+
 async function ensureAssigneesBelongToProject(projectId, assigneeIds = []) {
   if (!assigneeIds.length) {
     return;
@@ -105,6 +131,15 @@ async function ensureAssigneesBelongToProject(projectId, assigneeIds = []) {
   }
 }
 
+async function ensureSubtaskAssigneeBelongsToProject(projectId, assigneeId) {
+  if (!assigneeId) {
+    return null;
+  }
+
+  await ensureAssigneesBelongToProject(projectId, [assigneeId]);
+  return assigneeId.toString();
+}
+
 function ensureAttachmentPayload(attachments = []) {
   attachments.forEach((attachment) => {
     if (!attachment?.name?.trim()) {
@@ -119,8 +154,8 @@ function ensureAttachmentPayload(attachments = []) {
 
 function resolveCompletionDate(board, columnId) {
   const targetColumn = board.columns.id(columnId);
-  const targetColumnName = targetColumn?.name?.toLowerCase?.() || "";
-  return targetColumnName.includes("complet") ? new Date() : null;
+  const semantic = columnSemanticFlyweightFactory.get(targetColumn);
+  return semantic.isCompletedColumn ? new Date() : null;
 }
 
 function resolveArchiveDate(board, columnId) {
@@ -479,15 +514,26 @@ exports.addSubtask = async (taskId, data, user) => {
     throw new Error("Subtask title is required");
   }
 
+  let assignedTo = null;
+
+  if (data.assignedTo !== undefined) {
+    await ensureSubtaskAssignmentPermission(task, project, user);
+    assignedTo = await ensureSubtaskAssigneeBelongsToProject(project._id, data.assignedTo);
+  }
+
   task.subtasks.push({
     title: data.title.trim(),
-    completed: false
+    completed: false,
+    assignedTo
   });
   task.history.push({
     action: "SUBTASK_CREATED",
     user: user.id,
     date: new Date(),
-    meta: { title: data.title.trim() }
+    meta: {
+      title: data.title.trim(),
+      assignedTo
+    }
   });
 
   await task.save();
@@ -504,7 +550,27 @@ exports.addSubtask = async (taskId, data, user) => {
       }
     }
   });
-  return serializeTask(await getTaskOrThrow(taskId, { populate: true }), { detail: true });
+  const updatedTask = await getTaskOrThrow(taskId, { populate: true });
+  const assignedSubtask = updatedTask.subtasks.id(createdSubtask._id);
+
+  if (assignedSubtask?.assignedTo?._id) {
+    emitTaskEvent(
+      { ...updatedTask.toObject(), projectId: project._id },
+      user.id,
+      "TASK_ASSIGNED",
+      "Subtarea asignada",
+      `${user.username || user.email || "Alguien"} te asigno la subtarea "${assignedSubtask.title}" en ${project.name}`,
+      "TASK_ASSIGNED",
+      [assignedSubtask.assignedTo._id],
+      buildTaskNotificationMeta(updatedTask, project, user, {
+        actionType: "SUBTASK_ASSIGNED",
+        subtaskId: assignedSubtask._id.toString(),
+        subtaskTitle: assignedSubtask.title
+      })
+    );
+  }
+
+  return serializeTask(updatedTask, { detail: true });
 };
 
 exports.updateSubtask = async (taskId, subtaskId, data, user) => {
@@ -526,6 +592,15 @@ exports.updateSubtask = async (taskId, subtaskId, data, user) => {
     subtask.title = data.title.trim();
   }
 
+  let assignmentChanged = false;
+
+  if (data.assignedTo !== undefined) {
+    await ensureSubtaskAssignmentPermission(task, project, user);
+    const nextAssignedToId = await ensureSubtaskAssigneeBelongsToProject(project._id, data.assignedTo);
+    assignmentChanged = toObjectIdString(subtask.assignedTo) !== nextAssignedToId;
+    subtask.assignedTo = nextAssignedToId;
+  }
+
   if (data.completed !== undefined) {
     subtask.completed = Boolean(data.completed);
     subtask.completedAt = subtask.completed ? new Date() : null;
@@ -538,12 +613,14 @@ exports.updateSubtask = async (taskId, subtaskId, data, user) => {
     date: new Date(),
     meta: {
       subtaskId: subtask._id.toString(),
-      completed: subtask.completed
+      completed: subtask.completed,
+      assignedTo: toObjectIdString(subtask.assignedTo)
     }
   });
 
   await task.save();
   const updatedTask = await getTaskOrThrow(taskId, { populate: true });
+  const updatedSubtask = updatedTask.subtasks.id(subtaskId);
 
   if (data.completed !== undefined) {
     const recipients = await resolveTaskNotificationRecipients(updatedTask, user.id, {
@@ -557,11 +634,28 @@ exports.updateSubtask = async (taskId, subtaskId, data, user) => {
       `${user.username || user.email || "Alguien"} actualizo una subtarea de "${updatedTask.title}" en ${project.name}`,
       "TASK_UPDATED",
       recipients,
+        buildTaskNotificationMeta(updatedTask, project, user, {
+          actionType: "SUBTASK_PROGRESS",
+          subtaskId: subtask._id.toString(),
+          subtaskTitle: subtask.title,
+          completed: subtask.completed
+        })
+      );
+    }
+
+  if (assignmentChanged && updatedSubtask?.assignedTo?._id) {
+    emitTaskEvent(
+      { ...updatedTask.toObject(), projectId: project._id },
+      user.id,
+      "TASK_ASSIGNED",
+      "Subtarea reasignada",
+      `${user.username || user.email || "Alguien"} te asigno la subtarea "${updatedSubtask.title}" en ${project.name}`,
+      "TASK_ASSIGNED",
+      [updatedSubtask.assignedTo._id],
       buildTaskNotificationMeta(updatedTask, project, user, {
-        actionType: "SUBTASK_PROGRESS",
-        subtaskId: subtask._id.toString(),
-        subtaskTitle: subtask.title,
-        completed: subtask.completed
+        actionType: "SUBTASK_REASSIGNED",
+        subtaskId: updatedSubtask._id.toString(),
+        subtaskTitle: updatedSubtask.title
       })
     );
   }

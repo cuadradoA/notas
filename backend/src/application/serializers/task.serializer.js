@@ -70,7 +70,8 @@ function serializeTask(task, { detail = false } = {}) {
       title: subtask.title,
       completed: subtask.completed,
       completedAt: subtask.completedAt || null,
-      completedBy: buildUserSummary(subtask.completedBy)
+      completedBy: buildUserSummary(subtask.completedBy),
+      assignedTo: buildUserSummary(subtask.assignedTo)
     })),
     comments: (source.comments || []).map((comment) => ({
       _id: comment._id,

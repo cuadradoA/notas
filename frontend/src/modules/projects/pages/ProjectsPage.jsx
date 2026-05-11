@@ -535,6 +535,7 @@ export default function ProjectsPage({ user, onLogout, onUserUpdate }) {
                 onTaskSearchChange={(value) =>
                   setTaskFilters((prev) => ({ ...prev, search: value }))
                 }
+                onInviteMembers={() => openPanel("invite", { email: "" })}
                 onOpenProfile={() =>
                   openPanel("profile", {
                     username: user?.username || "",

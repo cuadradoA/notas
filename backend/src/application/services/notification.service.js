@@ -1,30 +1,21 @@
-const Notification = require("../../domain/entities/Notification");
-const { sendNotification } = require("../../infrastructure/realtime/socket");
 const UserSettingsService = require("./user-settings.service");
+const DatabaseNotificationChannel = require("../notifications/DatabaseNotificationChannel");
+const UserPreferenceNotificationDecorator = require("../notifications/decorators/UserPreferenceNotificationDecorator");
+const RealtimeNotificationDecorator = require("../notifications/decorators/RealtimeNotificationDecorator");
+const Notification = require("../../domain/entities/Notification");
+
+const notificationChannel = new UserPreferenceNotificationDecorator(
+  new RealtimeNotificationDecorator(new DatabaseNotificationChannel()),
+  UserSettingsService
+);
 
 exports.notify = async (userId, message, type = "INFO", options = {}) => {
-  const preferences = await UserSettingsService.getNotificationPreferences(userId);
-  const preferenceKey = options.preferenceKey;
-
-  if (preferenceKey && preferences?.events?.[preferenceKey] === false) {
-    return null;
-  }
-
-  if (!preferences?.inApp) {
-    return null;
-  }
-
-  const notification = await Notification.create({
+  return notificationChannel.send({
     userId,
-    title: options.title || "",
     message,
     type,
-    meta: options.meta || {},
-    read: false
+    options
   });
-
-  sendNotification(userId.toString(), notification);
-  return notification;
 };
 
 exports.getMyNotifications = async (userId) => {

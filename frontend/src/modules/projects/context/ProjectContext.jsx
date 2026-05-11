@@ -29,6 +29,18 @@ export function ProjectProvider({ children }) {
     refreshProjects().catch(() => {});
   }, []);
 
+  useEffect(() => {
+    const handleExternalRefresh = () => {
+      refreshProjects().catch(() => {});
+    };
+
+    window.addEventListener("taskflow:projects-sync", handleExternalRefresh);
+
+    return () => {
+      window.removeEventListener("taskflow:projects-sync", handleExternalRefresh);
+    };
+  }, []);
+
   const value = useMemo(() => ({
     projects,
     loading,

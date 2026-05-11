@@ -123,3 +123,39 @@ exports.exportPdf = async (req, res) => {
     res.status(400).json({ error: e.message });
   }
 };
+
+exports.acceptInvitation = async (req, res) => {
+  try {
+    const result = await ProjectService.acceptInvitation(req.params.invitationId, req.user);
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+};
+
+exports.rejectInvitation = async (req, res) => {
+  try {
+    const result = await ProjectService.rejectInvitation(req.params.invitationId, req.user);
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+};
+
+exports.exportJson = async (req, res) => {
+  try {
+    const payload = await ProjectService.exportProjectJson(req.params.id, req.user);
+    res.json(payload);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+};
+
+exports.getStructure = async (req, res) => {
+  try {
+    const data = await ProjectService.getProjectStructure(req.params.id, req.user);
+    res.json(data);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+};

@@ -1,11 +1,4 @@
-const InvitationEmailService = require("../../application/ports/InvitationEmailService");
+const ConsoleInvitationEmailAdapter = require("./adapters/ConsoleInvitationEmailAdapter");
+const LegacyConsoleMailer = require("./legacy/LegacyConsoleMailer");
 
-class MockInvitationEmailService extends InvitationEmailService {
-  async sendProjectInvitation({ to, projectName, invitedByEmail }) {
-    console.log(
-      `[MockEmail] Invitation sent to ${to} for project "${projectName}" by ${invitedByEmail}`
-    );
-  }
-}
-
-module.exports = new MockInvitationEmailService();
+module.exports = new ConsoleInvitationEmailAdapter(new LegacyConsoleMailer());

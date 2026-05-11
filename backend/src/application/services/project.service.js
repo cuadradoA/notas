@@ -4,15 +4,22 @@ const Board = require("../../domain/entities/Board");
 const Task = require("../../domain/entities/Task");
 const User = require("../../domain/entities/User");
 const ProjectMember = require("../../domain/entities/ProjectMember");
+const Notification = require("../../domain/entities/Notification");
 const ProjectFactoryResolver = require("../../domain/factories/projects/ProjectFactoryResolver");
 const BoardFactoryResolver = require("../../domain/factories/boards/BoardFactoryResolver");
 const { ProjectStatus, PROJECT_STATUSES } = require("../../domain/value-objects/ProjectStatus");
 const invitationEmailService = require("../../infrastructure/email/MockInvitationEmailService");
 const AuditLogService = require("./audit-log.service");
 const domainEvents = require("../../infrastructure/events/domain-events");
+const ProjectReportingFacade = require("../reporting/facades/ProjectReportingFacade");
+const NotificationService = require("./notification.service");
 
 function getUserId(user) {
   return user?.id?.toString?.() || user?._id?.toString?.() || null;
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
 }
 
 function isCreatorOrAdmin(project, user) {
@@ -100,42 +107,146 @@ async function cloneProjectBoards(sourceProjectId, targetProjectId) {
 }
 
 async function calculateProjectProgress(projectId) {
-  const boards = await Board.find({ projectId }).select("_id columns");
-  const boardIds = boards.map((board) => board._id);
+  const project = await Project.findById(projectId).select("name status");
 
-  if (!boardIds.length) {
-    return {
-      totalTasks: 0,
-      completedTasks: 0,
-      progress: 0
-    };
+  if (!project) {
+    throw new Error("Project not found");
   }
 
-  const tasks = await Task.find({ boardId: { $in: boardIds } }).select("columnId completedAt");
-  const completedColumnIds = new Set(
-    boards.flatMap((board) =>
-      (board.columns || [])
-        .filter((column) => {
-          const normalizedName = column.name
-            ?.normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "")
-            .toLowerCase();
+  return ProjectReportingFacade.getOverviewMetrics(project);
+}
 
-          return normalizedName?.includes("complet") || normalizedName?.includes("done");
-        })
-        .map((column) => column._id.toString())
-    )
+async function syncProjectInvitationNotification(invitationId, userId, invitationStatus) {
+  await Notification.updateMany(
+    {
+      userId,
+      type: "PROJECT_INVITATION",
+      "meta.invitationId": invitationId.toString()
+    },
+    {
+      $set: {
+        read: invitationStatus !== "INVITED",
+        "meta.invitationStatus": invitationStatus,
+        "meta.resolvedAt": invitationStatus === "INVITED" ? null : new Date().toISOString()
+      }
+    }
   );
-  const totalTasks = tasks.length;
-  const completedTasks = tasks.filter((task) =>
-    Boolean(task.completedAt) ||
-    completedColumnIds.has((task.columnId || "").toString())
-  ).length;
+}
+
+async function notifyInvitationRecipient({ invitation, project, inviter, recipientUser }) {
+  if (!recipientUser) {
+    return null;
+  }
+
+  const message = `${inviter.username || inviter.email || "Alguien"} te invito a colaborar en ${project.name}`;
+
+  return NotificationService.notify(recipientUser._id, message, "PROJECT_INVITATION", {
+    title: "Invitacion de proyecto",
+    meta: {
+      invitationId: invitation._id.toString(),
+      invitationStatus: invitation.status,
+      projectId: project._id.toString(),
+      projectName: project.name,
+      invitedById: getUserId(inviter),
+      invitedByEmail: inviter.email || "",
+      invitedByName: inviter.username || inviter.email || "Usuario"
+    }
+  });
+}
+
+async function notifyInvitationResolution({ project, invitation, actor, decision }) {
+  const inviterId = getUserId(invitation.invitedBy);
+
+  if (!inviterId || inviterId === getUserId(actor)) {
+    return null;
+  }
+
+  const actorName = actor.username || actor.email || "Un usuario";
+  const title = decision === "ACCEPTED" ? "Invitacion aceptada" : "Invitacion rechazada";
+  const message = decision === "ACCEPTED"
+    ? `${actorName} acepto tu invitacion al proyecto ${project.name}`
+    : `${actorName} rechazo tu invitacion al proyecto ${project.name}`;
+
+  return NotificationService.notify(inviterId, message, `PROJECT_INVITATION_${decision}`, {
+    title,
+    meta: {
+      invitationId: invitation._id.toString(),
+      invitationStatus: decision,
+      projectId: project._id.toString(),
+      projectName: project.name,
+      actorId: getUserId(actor),
+      actorName,
+      syncProjects: true
+    }
+  });
+}
+
+async function resolveInvitationForCurrentUser(invitationId, user, nextStatus) {
+  if (!mongoose.Types.ObjectId.isValid(invitationId)) {
+    throw new Error("Invalid invitation id");
+  }
+
+  const invitation = await ProjectMember.findById(invitationId).populate("invitedBy", "username email");
+
+  if (!invitation) {
+    throw new Error("Invitation not found");
+  }
+
+  const userId = getUserId(user);
+  const matchesUser =
+    invitation.userId?.toString?.() === userId ||
+    invitation.email === normalizeEmail(user.email);
+
+  if (!matchesUser) {
+    throw new Error("You cannot manage this invitation");
+  }
+
+  if (invitation.status !== "INVITED") {
+    throw new Error("This invitation has already been resolved");
+  }
+
+  const project = await getProjectOrThrow(invitation.projectId);
+
+  if (nextStatus === "ACTIVE") {
+    const alreadyMember = project.members.some((member) => member._id?.toString?.() === userId || member.toString?.() === userId);
+
+    if (!alreadyMember) {
+      project.members.push(userId);
+      await project.save();
+    }
+
+    invitation.status = "ACTIVE";
+    invitation.userId = userId;
+    invitation.joinedAt = new Date();
+  } else {
+    invitation.status = "REJECTED";
+  }
+
+  invitation.respondedAt = new Date();
+  await invitation.save();
+  await syncProjectInvitationNotification(invitation._id, userId, invitation.status);
+  await notifyInvitationResolution({
+    project,
+    invitation,
+    actor: user,
+    decision: nextStatus === "ACTIVE" ? "ACCEPTED" : "REJECTED"
+  });
+
+  domainEvents.emit("project.event", {
+    projectId: project._id,
+    action: nextStatus === "ACTIVE" ? "PROJECT_INVITATION_ACCEPTED" : "PROJECT_INVITATION_REJECTED",
+    actorId: userId,
+    meta: {
+      invitationId: invitation._id.toString(),
+      email: invitation.email
+    }
+  });
 
   return {
-    totalTasks,
-    completedTasks,
-    progress: totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0
+    success: true,
+    invitationId: invitation._id.toString(),
+    status: invitation.status,
+    project: await enrichProject(await Project.findById(project._id).populate("members", "username email role"))
   };
 }
 
@@ -297,10 +408,14 @@ exports.inviteMember = async (projectId, email, user) => {
   await ensureCanManage(project, user);
   ensureNotArchived(project);
 
-  const normalizedEmail = email?.trim().toLowerCase();
+  const normalizedEmail = normalizeEmail(email);
 
   if (!normalizedEmail) {
     throw new Error("Email is required");
+  }
+
+  if (normalizedEmail === normalizeEmail(user.email)) {
+    throw new Error("You are already part of this project");
   }
 
   const existingInvitation = await ProjectMember.findOne({
@@ -308,33 +423,34 @@ exports.inviteMember = async (projectId, email, user) => {
     email: normalizedEmail
   });
 
-  if (existingInvitation) {
+  if (existingInvitation?.status === "ACTIVE") {
+    throw new Error("This user already belongs to the project");
+  }
+
+  if (existingInvitation?.status === "INVITED") {
     throw new Error("This email has already been invited");
   }
 
   const invitedUser = await User.findOne({ email: normalizedEmail });
-  const invitationStatus = invitedUser ? "ACTIVE" : "INVITED";
-
-  await ProjectMember.create({
+  const invitation = existingInvitation || new ProjectMember({
     projectId: project._id,
-    userId: invitedUser?._id || null,
-    email: normalizedEmail,
-    role: "MEMBER",
-    status: invitationStatus,
-    invitedBy: user.id,
-    joinedAt: invitedUser ? new Date() : null
+    email: normalizedEmail
   });
 
-  if (invitedUser) {
-    const alreadyMember = project.members.some(
-      (memberId) => memberId.toString() === invitedUser._id.toString()
-    );
+  invitation.userId = invitedUser?._id || null;
+  invitation.role = "MEMBER";
+  invitation.status = "INVITED";
+  invitation.invitedBy = user.id;
+  invitation.joinedAt = null;
+  invitation.respondedAt = null;
+  await invitation.save();
 
-    if (!alreadyMember) {
-      project.members.push(invitedUser._id);
-      await project.save();
-    }
-  }
+  await notifyInvitationRecipient({
+    invitation,
+    project,
+    inviter: user,
+    recipientUser: invitedUser
+  });
 
   await invitationEmailService.sendProjectInvitation({
     to: normalizedEmail,
@@ -345,8 +461,18 @@ exports.inviteMember = async (projectId, email, user) => {
   return {
     success: true,
     email: normalizedEmail,
-    status: invitationStatus
+    status: invitation.status,
+    invitationId: invitation._id.toString(),
+    delivery: invitedUser ? "IN_APP_AND_EMAIL" : "EMAIL_ONLY"
   };
+};
+
+exports.acceptInvitation = async (invitationId, user) => {
+  return resolveInvitationForCurrentUser(invitationId, user, "ACTIVE");
+};
+
+exports.rejectInvitation = async (invitationId, user) => {
+  return resolveInvitationForCurrentUser(invitationId, user, "REJECTED");
 };
 
 exports.cloneProject = async (projectId, data, user) => {
@@ -431,152 +557,31 @@ exports.getProjectDashboard = async (projectId, user) => {
   const project = await getProjectOrThrow(projectId);
   ensureCanAccess(project, user);
 
-  const boards = await Board.find({ projectId }).select("_id columns");
-  const boardIds = boards.map((board) => board._id);
-  const tasks = boardIds.length ? await Task.find({ boardId: { $in: boardIds } }).populate("assignees", "username email") : [];
-  const progressData = await calculateProjectProgress(projectId);
-  const completedColumnIds = new Set(
-    boards.flatMap((board) =>
-      (board.columns || [])
-        .filter((column) => column.name.toLowerCase().includes("complet"))
-        .map((column) => column._id.toString())
-    )
-  );
-
-  const tasksByStatus = boards.flatMap((board) => board.columns || []).reduce((acc, column) => {
-    acc[column.name] = tasks.filter((task) => task.columnId?.toString?.() === column._id.toString() || task.columnId === column.name).length;
-    return acc;
-  }, {});
-
-  const tasksByUser = tasks.reduce((acc, task) => {
-    if (!task.assignees?.length) {
-      acc["Sin asignar"] = (acc["Sin asignar"] || 0) + 1;
-      return acc;
-    }
-
-    task.assignees.forEach((assignee) => {
-      const label = assignee.username || assignee.email;
-      acc[label] = (acc[label] || 0) + 1;
-    });
-
-    return acc;
-  }, {});
-
-  const overdueTasks = tasks.filter((task) => task.dueDate && task.dueDate.getTime() < Date.now() && !completedColumnIds.has(task.columnId?.toString?.())).length;
-  const completedByWeek = tasks
-    .filter((task) => completedColumnIds.has(task.columnId?.toString?.()))
-    .reduce((acc, task) => {
-      const date = task.updatedAt || task.createdAt;
-      const startOfWeek = new Date(date);
-      startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
-      const key = startOfWeek.toISOString().slice(0, 10);
-      acc[key] = (acc[key] || 0) + 1;
-      return acc;
-    }, {});
-
-  return {
-    project: {
-      _id: project._id,
-      name: project.name,
-      status: project.status
-    },
-    overview: {
-      totalTasks: tasks.length,
-      overdueTasks,
-      progress: progressData.progress
-    },
-    tasksByStatus,
-    tasksByUser,
-    completedByWeek
-  };
+  return ProjectReportingFacade.getDashboard(project);
 };
 
 exports.exportProjectCsv = async (projectId, user) => {
   const project = await getProjectOrThrow(projectId);
   ensureCanAccess(project, user);
-  const boards = await Board.find({ projectId }).select("_id");
-  const boardIds = boards.map((board) => board._id);
-  const tasks = boardIds.length ? await Task.find({ boardId: { $in: boardIds } }).populate("assignees", "username email") : [];
-  const lines = [
-    ["title", "type", "priority", "dueDate", "estimatedHours", "spentHours", "assignees"].join(","),
-    ...tasks.map((task) => [
-      `"${(task.title || "").replace(/"/g, '""')}"`,
-      task.type || "",
-      task.priority || "",
-      task.dueDate ? task.dueDate.toISOString() : "",
-      task.estimatedHours || 0,
-      task.spentHours || 0,
-      `"${(task.assignees || []).map((assignee) => assignee.username || assignee.email).join(" | ")}"`
-    ].join(","))
-  ];
-
-  return lines.join("\n");
+  return ProjectReportingFacade.export(project, "csv");
 };
 
-function escapePdfText(value) {
-  return String(value || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)");
-}
-
 exports.exportProjectPdf = async (projectId, user) => {
-  const dashboard = await exports.getProjectDashboard(projectId, user);
-  const lines = [
-    `Reporte del proyecto: ${dashboard.project.name}`,
-    `Estado: ${dashboard.project.status}`,
-    `Total tareas: ${dashboard.overview.totalTasks}`,
-    `Tareas vencidas: ${dashboard.overview.overdueTasks}`,
-    `Progreso general: ${dashboard.overview.progress}%`,
-    "",
-    "Tareas por estado:",
-    ...Object.entries(dashboard.tasksByStatus).map(([label, value]) => `- ${label}: ${value}`),
-    "",
-    "Tareas por usuario:",
-    ...Object.entries(dashboard.tasksByUser).map(([label, value]) => `- ${label}: ${value}`),
-    "",
-    "Velocidad por semana:",
-    ...Object.entries(dashboard.completedByWeek).map(([label, value]) => `- ${label}: ${value}`)
-  ];
-  const content = [
-    "BT",
-    "/F1 16 Tf",
-    "50 780 Td",
-    ...lines.flatMap((line, index) => (
-      index === 0
-        ? [`(${escapePdfText(line)}) Tj`]
-        : ["0 -18 Td", `(${escapePdfText(line)}) Tj`]
-    )),
-    "ET"
-  ].join("\n");
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-    `<< /Length ${Buffer.byteLength(content, "utf8")} >>\nstream\n${content}\nendstream`,
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
-  ];
+  const project = await getProjectOrThrow(projectId);
+  ensureCanAccess(project, user);
+  return ProjectReportingFacade.export(project, "pdf");
+};
 
-  let pdf = "%PDF-1.4\n";
-  const offsets = [0];
+exports.exportProjectJson = async (projectId, user) => {
+  const project = await getProjectOrThrow(projectId);
+  ensureCanAccess(project, user);
+  return ProjectReportingFacade.export(project, "json");
+};
 
-  objects.forEach((object, index) => {
-    offsets.push(Buffer.byteLength(pdf, "utf8"));
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  });
-
-  const startXref = Buffer.byteLength(pdf, "utf8");
-  pdf += `xref
-0 ${objects.length + 1}
-0000000000 65535 f 
-${offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `).join("\n")}
-trailer
-<< /Size ${objects.length + 1} /Root 1 0 R >>
-startxref
-${startXref}
-%%EOF`;
-
-  return Buffer.from(pdf, "utf8");
+exports.getProjectStructure = async (projectId, user) => {
+  const project = await getProjectOrThrow(projectId);
+  ensureCanAccess(project, user);
+  return ProjectReportingFacade.getStructure(project);
 };
 
 exports.ensureProjectIsWritableFromBoard = async (boardId) => {

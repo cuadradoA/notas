@@ -11,12 +11,16 @@ router.get("/:id", authenticate, controller.getById);
 router.put("/:id", authenticate, controller.update);
 router.delete("/:id", authenticate, controller.remove);
 router.post("/:id/invite", authenticate, controller.invite);
+router.post("/invitations/:invitationId/accept", authenticate, controller.acceptInvitation);
+router.post("/invitations/:invitationId/reject", authenticate, controller.rejectInvitation);
 router.post("/:id/clone", authenticate, controller.clone);
 router.post("/:id/archive", authenticate, controller.archive);
 router.patch("/:id/status", authenticate, controller.changeStatus);
 router.get("/:id/dashboard", authenticate, controller.getDashboard);
+router.get("/:id/structure", authenticate, controller.getStructure);
 router.get("/:id/audit-logs", authenticate, authorize("ADMIN"), controller.getAuditLogs);
 router.get("/:id/export.csv", authenticate, controller.exportCsv);
 router.get("/:id/export.pdf", authenticate, controller.exportPdf);
+router.get("/:id/export.json", authenticate, controller.exportJson);
 
 module.exports = router;

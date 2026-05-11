@@ -5,6 +5,7 @@ export default function ProjectHeaderBar({
   user,
   taskSearch,
   onTaskSearchChange,
+  onInviteMembers,
   onOpenProfile,
   onToggleTheme,
   onOpenAdmin,
@@ -25,6 +26,17 @@ export default function ProjectHeaderBar({
           <div className="flex w-full min-w-0 sm:min-w-[260px] xl:w-[280px] items-center rounded-2xl px-4 py-3" style={{ backgroundColor: "var(--app-surface)" }}>
             <input value={taskSearch} onChange={(e) => onTaskSearchChange(e.target.value)} placeholder="Buscar tareas o texto..." className="w-full bg-transparent text-sm outline-none" style={{ color: "var(--app-text)" }} />
           </div>
+          <button
+            onClick={onInviteMembers}
+            disabled={!selectedProject || selectedProject.status === "ARCHIVADO"}
+            className="rounded-2xl px-4 py-3 text-sm font-medium disabled:opacity-50"
+            style={{
+              backgroundColor: "color-mix(in srgb, var(--app-success) 16%, var(--app-surface))",
+              color: "var(--app-success)",
+            }}
+          >
+            Invitar
+          </button>
           <NotificationBell />
           <button onClick={onOpenProfile} className="rounded-2xl border px-4 py-3 text-sm" style={ghostButtonStyle}>Perfil</button>
           <button onClick={onToggleTheme} className="rounded-2xl border px-4 py-3 text-sm" style={ghostButtonStyle}>{themeLabel}</button>

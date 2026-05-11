@@ -24,14 +24,15 @@ const projectMemberSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["ACTIVE", "INVITED"],
+    enum: ["ACTIVE", "INVITED", "REJECTED"],
     default: "INVITED"
   },
   invitedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User"
   },
-  joinedAt: Date
+  joinedAt: Date,
+  respondedAt: Date
 }, { timestamps: true });
 
 projectMemberSchema.index({ projectId: 1, email: 1 }, { unique: true });

@@ -126,6 +126,10 @@ export function NotificationProvider({ children, user }) {
         });
 
         socket.on("notification", (notification) => {
+          if (notification?.meta?.syncProjects) {
+            window.dispatchEvent(new CustomEvent("taskflow:projects-sync"));
+          }
+
           setNotifications((prev) => {
             const alreadyExists = prev.some((item) => item._id === notification._id);
 

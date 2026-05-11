@@ -25,6 +25,16 @@ export const inviteProjectMember = async (projectId, email) => {
   return res.data;
 };
 
+export const acceptProjectInvitation = async (invitationId) => {
+  const res = await api.post(`/projects/invitations/${invitationId}/accept`);
+  return res.data;
+};
+
+export const rejectProjectInvitation = async (invitationId) => {
+  const res = await api.post(`/projects/invitations/${invitationId}/reject`);
+  return res.data;
+};
+
 export const cloneProject = async (projectId, payload) => {
   const res = await api.post(`/projects/${projectId}/clone`, payload);
   return res.data;

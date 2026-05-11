@@ -34,6 +34,11 @@ const subtaskSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     default: null
+  },
+  assignedTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null
   }
 }, { timestamps: true });
 
@@ -269,7 +274,8 @@ taskSchema.methods.clone = function clone(options = {}) {
     title: subtask.title,
     completed: false,
     completedAt: null,
-    completedBy: null
+    completedBy: null,
+    assignedTo: null
   }));
 
   return cloned;
